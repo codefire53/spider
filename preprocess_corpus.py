@@ -6,8 +6,10 @@ import pickle
 import time
 from collections import defaultdict
 from multiprocessing.pool import Pool
+from Sastrawi.StopWordRemover.StopWordRemoverFactory import StopWordRemoverFactory
 
 import spacy
+import datasets
 import transformers
 from transformers import AutoTokenizer
 
@@ -26,7 +28,7 @@ STOPWORDS = {'ourselves', 'hers', 'between', 'yourself', 'but', 'again', 'there'
 class DocumentProcessor:
     def __init__(self, tokenizer, compute_recurring_spans=True, min_span_length=1, max_span_length=10,
                  validate_spans=True, include_sub_clusters=False):
-        self.nlp = spacy.load("en_core_web_sm") if compute_recurring_spans else None
+        self.nlp = spacy.blank("id") if compute_recurring_spans else None
         self.tokenizer = tokenizer
         self.compute_recurring_spans = compute_recurring_spans
         self.min_span_length = min_span_length
@@ -38,7 +40,7 @@ class DocumentProcessor:
         output = defaultdict(list)
         for psg in doc_psgs:
             psg_idx, psg_tokens = psg
-            tokens_txt = [t.text.lower() for t in psg_tokens]
+            tokens_txt = [psg_token.text.lower() for psg_token in psg_tokens]
             for i in range(len(psg_tokens)):
                 for j in range(i + self.min_span_length, min(i + self.max_span_length, len(psg_tokens))):
                     length = j - i
@@ -50,15 +52,21 @@ class DocumentProcessor:
         return output
 
     @staticmethod
+    def get_stopwords():
+        stopwords_factory = StopWordRemoverFactory()
+        return stopwords_factory.get_stopwords()
+
+    @staticmethod
     def validate_ngram(tokens, start_index, length):
         if any((not tokens[idx].is_alpha) and (not tokens[idx].is_digit) for idx in
                range(start_index, start_index + length)):
             return False
-
+        
         # We filter out n-grams that are all stopwords, or that begin or end with stop words (e.g. "in the", "with my", ...)
-        if any(tokens[idx].text.lower() not in STOPWORDS for idx in range(start_index, start_index + length)) and \
-                tokens[start_index].text.lower() not in STOPWORDS and tokens[
-            start_index + length - 1].text.lower() not in STOPWORDS:
+        indo_stopwords = DocumentProcessor.get_stopwords()
+        if any(tokens[idx].text.lower() not in indo_stopwords for idx in range(start_index, start_index + length)) and \
+                tokens[start_index].text.lower() not in indo_stopwords and tokens[
+            start_index + length - 1].text.lower() not in indo_stopwords:
             return True
 
         # TODO: Consider validating that the recurring span is not contained in the title (and vice versa)
@@ -200,8 +208,44 @@ class DocumentProcessor:
                 encoded_psgs[psg_id] = (encoded_title, encoded_psg_txt)
             return encoded_psgs, []
 
+def load_mrtydi_dataset():
+    lang = 'id'
+    dataset = 'castorini/mr-tydi-corpus'
+    article_to_psgs = defaultdict(list)  # title -> List of psgs
+    num_psgs = 0
+    print("Loading Mr Tydi corpus...")
+    start_time = time.time()
+    psgs = datasets.load_dataset(dataset, lang)['train']
+    for psg in psgs:
+        psg_id = psg['docid']
+        psg_txt = psg['text']
+        title = psg['title']
+        num_psgs += 1
+        article_to_psgs[title].append((psg_id, psg_txt))
+    end_time = time.time()
+    print(f"Done! Took {(end_time - start_time) / 60:.1f} minutes")
+    return article_to_psgs, num_psgs  # , psg_to_article
+
+def load_miracl_dataset():
+    lang = 'id'
+    dataset = 'miracl/miracl-corpus'
+    article_to_psgs = defaultdict(list)  # title -> List of psgs
+    num_psgs = 0
+    print("Loading MIRACL corpus...")
+    start_time = time.time()
+    psgs = datasets.load_dataset(dataset, lang)['train']
+    for psg in psgs:
+        psg_id = psg['docid']
+        psg_txt = psg['text']
+        title = psg['title']
+        num_psgs += 1
+        article_to_psgs[title].append((psg_id, psg_txt))
+    end_time = time.time()
+    print(f"Done! Took {(end_time - start_time) / 60:.1f} minutes")
+    return article_to_psgs, num_psgs  # , psg_to_article
 
 def load_wiki_dump(dump_path):
+    assert dump_path is not None
     # psg_to_article = {}  # psg id -> title
     article_to_psgs = defaultdict(list)  # title -> List of psgs
     print(f"Loading wiki dump from {dump_path}")
@@ -299,9 +343,12 @@ def main(args):
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
 
     transformers.logging.set_verbosity_error()
-
-    article_to_psgs, num_psgs = load_wiki_dump(args.corpus_path)
-    # create_examples(args, article_to_psgs, tokenizer, tokenized_file, recurring_span_file)
+    if args.dataset_name == 'miracl':
+        article_to_psgs, num_psgs = load_miracl_dataset()
+    elif args.dataset_name == 'mr.tydi':
+        article_to_psgs, num_psgs = load_mrtydi_dataset()
+    else:
+        article_to_psgs, num_psgs = load_wiki_dump(args.corpus_path)
     params = create_params_for_multiprocessing(args, article_to_psgs, num_psgs, tokenizer)
     with Pool(args.num_processes if args.num_processes else None) as p:
         p.starmap(preprocess_shard, params)
@@ -309,14 +356,15 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    parser.add_argument('--dataset_name', required=True, type=str, default='miracl')
+    parser.add_argument("--corpus_path", required=False, type=str)
 
-    parser.add_argument("--corpus_path", required=True, type=str)
     parser.add_argument("--output_dir", required=True, type=str)
-    parser.add_argument("--tokenizer_name", type=str, default="bert-base-uncased")
+    parser.add_argument("--tokenizer_name", type=str, default="indobenchmark/indobert-base-p2")
     parser.add_argument("--compute_recurring_spans", action="store_true")
     parser.add_argument("--min_span_length", type=int, default=1)
     parser.add_argument("--max_span_length", type=int, default=10)
-    parser.add_argument("--num_processes", type=int, default=64)
+    parser.add_argument("--num_processes", type=int, default=6)
 
     args = parser.parse_args()
     main(args)

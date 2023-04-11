@@ -9,4 +9,5 @@ tqdm>=4.27
 wget
 spacy>=2.1.8
 wandb
-pyserini
+Sastrawi
+datasets
