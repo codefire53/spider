@@ -62,7 +62,7 @@ class DocumentProcessor:
                range(start_index, start_index + length)):
             return False
         
-        # We filter out n-grams that are all stopwords, or that begin or end with stop words (e.g. "in the", "with my", ...)
+        # We filter out n-grams that are all stopwords, or that begin or end with stop words
         indo_stopwords = DocumentProcessor.get_stopwords()
         if any(tokens[idx].text.lower() not in indo_stopwords for idx in range(start_index, start_index + length)) and \
                 tokens[start_index].text.lower() not in indo_stopwords and tokens[
@@ -168,15 +168,20 @@ class DocumentProcessor:
             return None
         return psgs
 
-    def _postprocess_recurring_span_examples(self, recurring_spans, all_candidate_psgs, title):
+    def _postprocess_recurring_span_examples(self, recurring_spans, all_candidate_psgs, title, min_positive_ctxs, min_negative_ctxs):
+        assert min_positive_ctxs > 0
         new_recurring_spans = []
         for span_str, span_occurrences in recurring_spans:
             positive_ctxs = set([psg_index for psg_index, _, __ in span_occurrences])
-            if len(positive_ctxs) < 2:
+            if len(positive_ctxs) < min_positive_ctxs:
                 continue
-            negative_ctxs = list(set([psg_index for psg_index, _ in all_candidate_psgs]) - positive_ctxs)
-            if len(negative_ctxs) < 1:
-                continue
+            if min_negative_ctxs >= 0:
+                negative_ctxs = list(set([psg_index for psg_index, _ in all_candidate_psgs]) - positive_ctxs)
+                if len(negative_ctxs) < min_negative_ctxs:
+                    continue
+            else:
+                negative_ctxs = []
+
             new_recurring_spans.append({
                 "span": span_str,
                 "title": title,
@@ -185,7 +190,7 @@ class DocumentProcessor:
             })
         return new_recurring_spans
 
-    def process_document(self, psgs, title):
+    def process_document(self, psgs, title, min_positive_ctxs, min_negative_ctxs):
         """
         This function gets a list of string corresponding to passages.
         It tokenizes them and finds clusters of recurring spans across the passages
@@ -198,7 +203,7 @@ class DocumentProcessor:
             else:
                 recurring_spans = []
             encoded_psgs, recurring_spans = self._encode_and_convert_span_indices(tokenized_psgs, title, recurring_spans)
-            recurring_spans = self._postprocess_recurring_span_examples(recurring_spans, psgs_for_recurring_spans, title)
+            recurring_spans = self._postprocess_recurring_span_examples(recurring_spans, psgs_for_recurring_spans, title, min_positive_ctxs, min_negative_ctxs)
             return encoded_psgs, recurring_spans
         else:
             encoded_psgs = {}
@@ -275,12 +280,14 @@ def preprocess_shard(shard_idx, args, article_to_psgs, tokenizer, tokenized_psgs
                                   min_span_length=args.min_span_length,
                                   validate_spans=True,
                                   include_sub_clusters=False)
+    min_positive_ctxs = args.min_positive_ctxs
+    min_negative_ctxs = args.min_negative_ctxs
     start_time = time.time()
     for i, (title, psgs) in enumerate(article_to_psgs):
         if shard_idx == 0 and i > 0 and i % 1000 == 0:
             minutes = (time.time() - start_time) / 60
             print(f"Finished {i} out of {len(article_to_psgs)} articles in shard 0. Took {minutes:0.1f} minutes")
-        encoded_psgs, recurring_spans = processor.process_document(psgs, title)
+        encoded_psgs, recurring_spans = processor.process_document(psgs, title, min_positive_ctxs, min_negative_ctxs)
         all_encoded_psgs.update(encoded_psgs)
         all_recurring_spans.extend(recurring_spans)
 
@@ -365,6 +372,8 @@ if __name__ == '__main__':
     parser.add_argument("--min_span_length", type=int, default=1)
     parser.add_argument("--max_span_length", type=int, default=10)
     parser.add_argument("--num_processes", type=int, default=6)
+    parser.add_argument("--min_positive_ctxs", type=int, default=1)
+    parser.add_argument("--min_negative_ctxs", type=int, default=-1)
 
     args = parser.parse_args()
     main(args)
